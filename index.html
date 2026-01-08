@@ -1,24 +1,372 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" href="/favicon.png" type="image/png" />
-    <title>QR Indoor Navigation</title>
-    <meta name="description" content="Indoor navigation app using QR codes for wayfinding" />
-    <meta name="author" content="HCI Project" />
-    <meta property="og:title" content="QR Indoor Navigation" />
-    <meta property="og:description" content="Indoor navigation app using QR codes for wayfinding" />
-    <meta property="og:type" content="website" />
-    <meta property="og:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+<head>
+  <meta charset="UTF-8" />
+  <title>QR Indoor Navigation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #000;
+      color: #fff;
+    }
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    header {
+      padding: 8px 12px;
+      background: #111;
+      font-size: 0.9rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #scanner-container {
+      position: relative;
+      flex: 1;
+      overflow: hidden;
+      background: #000;
+    }
+    #reader {
+      width: 100%;
+      height: 100%;
+    }
+    #overlay {
+      pointer-events: none;
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    #dest-label {
+      padding: 6px 10px;
+      background: rgba(0,0,0,0.7);
+      font-size: 0.9rem;
+    }
+    #character-row {
+      display: flex;
+      align-items: flex-end;
+      padding: 8px;
+      gap: 8px;
+    }
+    #character {
+      width: 72px;
+      height: 72px;
+      background: #333;
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+    }
+    #dialog {
+      flex: 1;
+      background: rgba(0,0,0,0.8);
+      border-radius: 12px;
+      padding: 8px 10px;
+      font-size: 0.9rem;
+      line-height: 1.3;
+    }
+    #arrow {
+      font-size: 2.4rem;
+      text-align: center;
+      margin-bottom: 4px;
+    }
+    #controls {
+      padding: 8px 12px;
+      background: #111;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.9rem;
+    }
+    #destination-select {
+      background: #000;
+      color: #fff;
+      border-radius: 4px;
+      border: 1px solid #444;
+      padding: 4px 6px;
+    }
+    #status-small {
+      font-size: 0.8rem;
+      opacity: 0.7;
+      margin-left: auto;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div>QR Indoor Navigation</div>
+      <div style="font-size:0.8rem;">Demo prototype</div>
+    </header>
 
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:site" content="@Lovable" />
-    <meta name="twitter:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
-  </head>
+    <div id="scanner-container">
+      <div id="reader"></div>
+      <div id="overlay">
+        <div id="dest-label"></div>
 
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+        <div id="character-row">
+          <div id="character">🧭</div>
+          <div id="dialog">
+            <div id="arrow">↑</div>
+            <div id="dialog-text">Scan a QR marker to start.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="controls">
+      <label>
+        Destination:
+        <select id="destination-select">
+          <option value="CLASS101">CLASS101</option>
+          <option value="CLASS102">CLASS102</option>
+        </select>
+      </label>
+      <div id="status-small">Waiting for camera...</div>
+    </div>
+  </div>
+
+  <!-- QR library -->
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+  <script>
+    // -------------------------------
+    // Graph and BFS logic (JS version)
+    // -------------------------------
+
+    const STEPS_PER_EDGE = 10;
+
+    const NODES = {
+      "N1": { room: null },
+      "N2": { room: null },
+      "N3": { room: "CLASS101" },
+      "N4": { room: "CLASS102" },
+    };
+
+    const EDGES = {
+      "N1": [["N2", "forward"]],
+      "N2": [["N1", "back"], ["N3", "right"], ["N4", "left"]],
+      "N3": [["N2", "back"]],
+      "N4": [["N2", "back"]],
+    };
+
+    class Navigator {
+      constructor(defaultRoom) {
+        this.destinationRoom = defaultRoom;
+        this.destinationNode = this.findDestinationNode();
+        this.currentNode = null;
+        this.startNode = null;
+        this.lastQrData = null;
+        this.nextDirection = null;
+        this.stepsRemaining = null;
+        this.statusMsg = "Scan a QR marker to start.";
+      }
+
+      findDestinationNode() {
+        for (const [id, info] of Object.entries(NODES)) {
+          if (info.room === this.destinationRoom) return id;
+        }
+        return null;
+      }
+
+      setDestinationRoom(room) {
+        this.destinationRoom = room;
+        this.destinationNode = this.findDestinationNode();
+        if (!this.destinationNode) {
+          this.statusMsg = `Destination ${room} not configured.`;
+        } else {
+          this.statusMsg = `Destination set to ${room}. Scan a QR to start.`;
+        }
+      }
+
+      bfsPath(start, goal) {
+        if (start === goal) return [start];
+        const queue = [start];
+        const prev = {};
+        prev[start] = null;
+
+        while (queue.length > 0) {
+          const node = queue.shift();
+          if (node === goal) break;
+          const neighbors = EDGES[node] || [];
+          for (const [neighbor, _dir] of neighbors) {
+            if (!(neighbor in prev)) {
+              prev[neighbor] = node;
+              queue.push(neighbor);
+            }
+          }
+        }
+
+        if (!(goal in prev)) return [start];
+
+        const path = [];
+        let n = goal;
+        while (n !== null) {
+          path.push(n);
+          n = prev[n];
+        }
+        path.reverse();
+        return path;
+      }
+
+      handleQr(qrData) {
+        if (qrData === this.lastQrData) return;
+        this.lastQrData = qrData;
+
+        if (!NODES[qrData]) {
+          this.statusMsg = `Unknown marker: ${qrData}`;
+          this.nextDirection = null;
+          this.stepsRemaining = null;
+          return;
+        }
+
+        this.currentNode = qrData;
+        if (!this.startNode) this.startNode = qrData;
+
+        if (!this.destinationNode) {
+          this.statusMsg = "Destination room not configured.";
+          this.nextDirection = null;
+          this.stepsRemaining = null;
+          return;
+        }
+
+        // Already at destination
+        if (this.currentNode === this.destinationNode) {
+          this.statusMsg = `You have arrived at ${this.destinationRoom}.`;
+          this.nextDirection = "done";
+          this.stepsRemaining = 0;
+          return;
+        }
+
+        const path = this.bfsPath(this.currentNode, this.destinationNode);
+        if (path.length < 2) {
+          this.statusMsg = "No path found from here.";
+          this.nextDirection = null;
+          this.stepsRemaining = null;
+          return;
+        }
+
+        const edgesLeft = Math.max(0, path.length - 1);
+        this.stepsRemaining = edgesLeft * STEPS_PER_EDGE;
+
+        const nextNode = path[1];
+        let direction = null;
+        const neighbors = EDGES[this.currentNode] || [];
+        for (const [neighbor, d] of neighbors) {
+          if (neighbor === nextNode) {
+            direction = d;
+            break;
+          }
+        }
+        if (!direction) {
+          this.statusMsg = "No direction info for the next step.";
+          this.nextDirection = null;
+          return;
+        }
+        this.nextDirection = direction;
+
+        let baseMsg;
+        switch (direction) {
+          case "forward":
+            baseMsg = "Walk straight until you see the next QR marker.";
+            break;
+          case "left":
+            baseMsg = "Turn left at the next junction and look for a QR marker.";
+            break;
+          case "right":
+            baseMsg = "Turn right at the next junction and look for a QR marker.";
+            break;
+          case "back":
+            baseMsg = "Turn back towards the previous QR marker.";
+            break;
+          default:
+            baseMsg = "Follow the direction shown.";
+        }
+
+        if (this.stepsRemaining != null) {
+          this.statusMsg = `${baseMsg} (~${this.stepsRemaining} steps remaining)`;
+        } else {
+          this.statusMsg = baseMsg;
+        }
+      }
+
+      getArrowSymbol() {
+        switch (this.nextDirection) {
+          case "forward": return "↑";
+          case "left": return "←";
+          case "right": return "→";
+          case "back": return "↓";
+          case "done": return "✓";
+          default: return "↑";
+        }
+      }
+    }
+
+    // -------------------------------
+    // Hooking everything to the DOM
+    // -------------------------------
+
+    const destSelect = document.getElementById("destination-select");
+    const destLabel = document.getElementById("dest-label");
+    const dialogText = document.getElementById("dialog-text");
+    const arrowEl = document.getElementById("arrow");
+    const statusSmall = document.getElementById("status-small");
+
+    const navigatorObj = new Navigator(destSelect.value);
+    destLabel.textContent = `Destination: ${navigatorObj.destinationRoom}`;
+    dialogText.textContent = navigatorObj.statusMsg;
+
+    destSelect.addEventListener("change", () => {
+      navigatorObj.setDestinationRoom(destSelect.value);
+      destLabel.textContent = `Destination: ${navigatorObj.destinationRoom}`;
+      dialogText.textContent = navigatorObj.statusMsg;
+    });
+
+    function updateUI() {
+      destLabel.textContent = `Destination: ${navigatorObj.destinationRoom}`;
+      dialogText.textContent = navigatorObj.statusMsg;
+      arrowEl.textContent = navigatorObj.getArrowSymbol();
+    }
+
+    function onScanSuccess(decodedText, decodedResult) {
+      // decodedText should be one of "N1", "N2", etc.
+      navigatorObj.handleQr(decodedText.trim());
+      updateUI();
+    }
+
+    function onScanFailure(error) {
+      // ignore; scanner keeps running
+    }
+
+    const html5QrCode = new Html5Qrcode("reader");
+
+    // Start camera on page load
+    Html5Qrcode.getCameras().then((devices) => {
+      if (!devices || devices.length === 0) {
+        statusSmall.textContent = "No camera found.";
+        return;
+      }
+      const cameraId = devices[0].id;
+      statusSmall.textContent = "Camera started.";
+      html5QrCode.start(
+        cameraId,
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+        },
+        onScanSuccess,
+        onScanFailure
+      );
+    }).catch(err => {
+      console.error(err);
+      statusSmall.textContent = "Camera access failed.";
+    });
+  </script>
+</body>
 </html>
